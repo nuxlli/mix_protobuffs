@@ -36,50 +36,54 @@ defmodule Mix.Tasks.Compile.Protobuffs do
   def run(args) do
     { opts, _ } = OptionParser.parse(args, switches: [force: :boolean])
 
-    source_paths = opts[:proto_paths] || ["proto"]
-    options = [output_include_dir: to_char_list("src"),
-               output_ebin_dir: to_char_list("ebin")] ++ opts
+    proto_paths  = opts[:protobuff_paths] || ["proto"]
+    incl_path = "src"
+    ebin_path = "ebin"
 
-    files = lc source_path inlist source_paths do
-              Erlang.extract_stale_pairs(source_path, "proto", "lib", "ex", opts[:force])
-            end |> List.flatten
+    File.mkdir_p!(incl_path)
+    File.mkdir_p!(ebin_path)
 
-    if files == [] do
-      :noop
-    else
-      File.mkdir(options[:output_include_dir])  # create "src" if necessary
-      compile_files(files, options)
-      generate_wrappers(files, options)
-      :ok
+    manifest = Path.join(ebin_path, ".compile.proto")
+    protos   = lc path inlist proto_paths, do: { path, "lib" }
+    options  = Keyword.merge([
+      output_include_dir: '#{incl_path}',
+      output_ebin_dir: '#{ebin_path}'
+    ], opts[:protobuff_options] || [])
+
+    Erlang.compile_mappings manifest, protos,
+      :proto, :ex, opts[:force],
+      fn input, output -> file_compile(input, output, options) end
+  end
+
+  defp file_compile(input, output, opts) do
+    case Compiler.scan_file('#{input}', opts) do
+      :error -> :error
+      _ ->
+        generate_wrapper(input, output)
+        {:ok, true}
     end
   end
 
-  defp compile_files(files, options) do
-    lc { input, _output } inlist files do
-      result = Compiler.scan_file(to_char_list(input), options)
-      Erlang.interpret_result(input, {result, :true})
-    end
-  end
+  defp generate_wrapper(input, output) do
+    basename = Path.basename(input, ".proto")
+    header   = "src/" <> basename <> "_pb.hrl"
+    records  = record_names(header)
 
-  defp generate_wrappers(files, _options) do
-    lc { input, output } inlist files do
-      basename = Path.basename(input, ".proto")
-      header = "src/" <> basename <> "_pb.hrl"
-      records = record_names(header)
-      {:ok, file} = File.open(output, [:write])
-      IO.write(file, "defmodule #{String.capitalize(basename)} do\n\n")
-      lc record inlist records do
-        IO.write(file, "  defrecord :#{record}, Record.extract(:#{record}, from: \"#{header}\")\n")
-        IO.write(file, "  def encode_#{record}(record), do: :#{basename}_pb.encode_#{record}(record)\n")
-        IO.write(file, "  def decode_#{record}(binary), do: :#{basename}_pb.decode_#{record}(binary)\n\n")
-      end
-      IO.write(file, "end")
-      File.close(file)
+    {:ok, file} = File.open(output, [:write])
+    IO.write(file, "defmodule #{String.capitalize(basename)} do\n\n")
+    lc record inlist records do
+      IO.write(file, "  defrecord :#{record}, Record.extract(:#{record}, from: \"#{header}\")\n")
+      IO.write(file, "  def encode_#{record}(record), do: :#{basename}_pb.encode_#{record}(record)\n")
+      IO.write(file, "  def decode_#{record}(binary), do: :#{basename}_pb.decode_#{record}(binary)\n\n")
     end
+    IO.write(file, "end")
+    File.close(file)
   end
 
   defp record_names(header) do
     contents = File.read!(header)
-    Regex.scan(%r/record\((.*),/, contents) |> List.flatten
+    Regex.scan(%r/record\((.*),/, contents) |> Enum.map fn
+      [_, record] -> record
+    end
   end
 end
